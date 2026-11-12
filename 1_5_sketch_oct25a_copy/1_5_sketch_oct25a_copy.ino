@@ -83,6 +83,11 @@ void setup() {
 
   // Setup Web Server Endpoints
   server.on("/light", HTTP_GET, handleLight);
+  
+  server.on("/ping", HTTP_GET, []() {
+    server.send(200, "text/plain", "WLED_S3_READY");
+  });
+
   server.begin();
   Serial.println("HTTP Server started");
 }

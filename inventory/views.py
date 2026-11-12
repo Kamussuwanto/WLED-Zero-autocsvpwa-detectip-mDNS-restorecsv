@@ -5,20 +5,19 @@ import requests
 from django.shortcuts import get_object_or_404, redirect, render
 from django.contrib import messages
 from .models import ElectronicPart, ElectronicTool
-
-
 import csv
 import io
-
-#from django.shortcuts import render, redirect
 from django.db.models import Q
-#from .models import ElectronicPart, ElectronicTool
 
+import concurrent.futures
+from django.core.cache import cache
 
-# inventory/views.py
+SUBNET_PREFIX = "192.168.43."
 
 # Option A: Use the static IP directly (Recommended if mDNS has latency over your phone hotspot)
-MCU_ADDRESS = "http://192.168.43.40"
+# Permanent mDNS address (replaces hardcoded IPs)
+# MCU_ADDRESS = "http://electronics-leds.local"
+# MCU_ADDRESS = "http://192.168.43.40"
 
 # Option B: Use the mDNS alias domain name 
 # MCU_ADDRESS = "http://electronics-leds.local"
@@ -36,28 +35,60 @@ def locate_tool(request, pk):
     tool = get_object_or_404(ElectronicTool, pk=pk)
     return _send_led_signal(request, tool.name, tool.led_index)
 
-def _send_led_signal(request, item_name, led_index):
-    """Helper function to execute the outbound API request to the hardware."""
+
+
+
+
+def _check_esp_ip(ip):
+    """Checks if a single IP address responds with our ESP32 signature."""
+    url = f"http://{ip}"
     try:
-        # Calls the ESP32-S3 route: http://electronics-leds.local
-        response = requests.get(f"{MCU_ADDRESS}/light", params={'led': led_index}, timeout=2.5)
-        
+        res = requests.get(f"{url}/ping", timeout=0.35)
+        if res.status_code == 200 and "WLED_S3_READY" in res.text:
+            return url
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+def get_mcu_address():
+    """Returns cached ESP32 IP, or scans the hotspot subnet to find it automatically."""
+    cached_url = cache.get("esp32_mcu_url")
+    if cached_url:
+        # Verify the cached IP is still active
+        if _check_esp_ip(cached_url.replace("http://", "")):
+            return cached_url
+
+    # Scan 192.168.43.1 through 192.168.43.254 in parallel
+    ips = [f"{SUBNET_PREFIX}{i}" for i in range(1, 255)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        for found_url in executor.map(_check_esp_ip, ips):
+            if found_url:
+                cache.set("esp32_mcu_url", found_url, timeout=None)
+                return found_url
+    return None
+
+
+def _send_led_signal(request, item_name, led_index):
+    """Finds the ESP32-S3 automatically, flashes the LED, and redirects back."""
+    mcu_url = get_mcu_address()
+    if not mcu_url:
+        messages.error(
+            request,
+            "❌ Hardware offline. Ensure your ESP32-S3 is powered and on your phone's hotspot."
+        )
+        return redirect('part_list')
+
+    try:
+        response = requests.get(f"{mcu_url}/light", params={'led': led_index}, timeout=2.5)
         if response.status_code == 200:
-            messages.success(request, f"⚡ Flashing drawer LED {led_index} for: {item_name}!")
+            messages.success(request, f"⚡ Flashing drawer LED {led_index} at {mcu_url} for: {item_name}!")
         else:
             messages.warning(request, f"MCU responded with status code {response.status_code}.")
-            
     except requests.exceptions.RequestException:
-        messages.error(
-            request, 
-            f"❌ Hardware offline. Ensure your ESP32-S3 is powered and on your phone's hotspot."
-        )
-        
-    # Redirect back to the page the user came from
-    return redirect(request.META.get('HTTP_REFERER', '/'))
+        cache.delete("esp32_mcu_url")
+        messages.error(request, "❌ Connection lost while sending signal. Please try again.")
 
-
-
+    return redirect('part_list')
 
 
 
