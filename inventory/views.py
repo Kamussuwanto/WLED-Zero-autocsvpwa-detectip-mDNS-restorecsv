@@ -8,9 +8,14 @@ from .models import ElectronicPart, ElectronicTool
 import csv
 import io
 from django.db.models import Q
-
 import concurrent.futures
 from django.core.cache import cache
+from django.views.decorators.cache import never_cache
+
+#import csv
+from django.http import HttpResponse
+#from .models import ElectronicPart
+
 
 SUBNET_PREFIX = "192.168.43."
 
@@ -38,27 +43,26 @@ def locate_tool(request, pk):
 
 
 
-
 def _check_esp_ip(ip):
-    """Checks if a single IP address responds with our ESP32 signature."""
+    """Checks if a single IP address responds with the ESP32 signature."""
     url = f"http://{ip}"
     try:
-        res = requests.get(f"{url}/ping", timeout=0.35)
+        res = requests.get(f"{url}/ping", timeout=0.8)
         if res.status_code == 200 and "WLED_S3_READY" in res.text:
             return url
     except requests.exceptions.RequestException:
         pass
     return None
-
+    
 def get_mcu_address():
-    """Returns cached ESP32 IP, or scans the hotspot subnet to find it automatically."""
+    """Returns cached ESP32 IP, or scans the hotspot subnet automatically."""
     cached_url = cache.get("esp32_mcu_url")
     if cached_url:
-        # Verify the cached IP is still active
         if _check_esp_ip(cached_url.replace("http://", "")):
             return cached_url
+        else:
+            cache.delete("esp32_mcu_url")
 
-    # Scan 192.168.43.1 through 192.168.43.254 in parallel
     ips = [f"{SUBNET_PREFIX}{i}" for i in range(1, 255)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         for found_url in executor.map(_check_esp_ip, ips):
@@ -66,10 +70,11 @@ def get_mcu_address():
                 cache.set("esp32_mcu_url", found_url, timeout=None)
                 return found_url
     return None
-
-
+    
 def _send_led_signal(request, item_name, led_index):
-    """Finds the ESP32-S3 automatically, flashes the LED, and redirects back."""
+    """Clears old messages, finds the ESP32-S3, flashes the LED, and redirects."""
+    list(messages.get_messages(request))
+
     mcu_url = get_mcu_address()
     if not mcu_url:
         messages.error(
@@ -92,6 +97,7 @@ def _send_led_signal(request, item_name, led_index):
 
 
 
+@never_cache
 def inventory_search_view(request):
     # --- Handle POST requests (Adding, Updating stock, or Deleting items) ---
     if request.method == 'POST':
@@ -181,7 +187,8 @@ def inventory_search_view(request):
     context = {
         'parts': parts,
         'tools': tools,
-        'query': query
+        'mcu_url': get_mcu_address(),
+        'query': query,
     }
     return render(request, 'inventory/part_list.html', context)
 
@@ -212,41 +219,94 @@ def bulk_import_parts(request):
             
 
             created_count = 0
+            updated_count = 0
             for row in csv.reader(io_string, delimiter=','):
-                # Skip blank or incomplete rows
                 if not row or len(row) < 3:
                     continue
                     
-                # Extract columns cleanly (Name, LED Index, Quantity are standard core inputs)
                 name_val = row[0].strip()
                 led_index_val = int(row[1].strip()) if row[1].strip().isdigit() else 0
                 quantity_val = int(row[2].strip()) if row[2].strip().isdigit() else 0
-                
-                # Check for optional metadata fields in rows, fall back to empty string if not provided
                 part_num_val = row[3].strip() if len(row) > 3 else ""
                 value_val = row[4].strip() if len(row) > 4 else ""
                 package_val = row[5].strip() if len(row) > 5 else ""
                 location_val = row[6].strip() if len(row) > 6 else ""
 
-                # Commit directly to the verified database model schema
-                ElectronicPart.objects.create(
-                    name=name_val,
-                    led_index=led_index_val,
-                    quantity=quantity_val,
-                    part_number=part_num_val,
-                    value=value_val,
-                    package_type=package_val,
-                    storage_location=location_val
-                )
-                created_count += 1
+                # If part_number is present, update the existing record or create a new one
+                if part_num_val:
+                    obj, created = ElectronicPart.objects.update_or_create(
+                        part_number=part_num_val,
+                        defaults={
+                            'name': name_val,
+                            'led_index': led_index_val,
+                            'quantity': quantity_val,
+                            'value': value_val,
+                            'package_type': package_val,
+                            'storage_location': location_val,
+                        }
+                    )
+                else:
+                    # Fallback if part_number is left blank: match by name & led_index
+                    obj, created = ElectronicPart.objects.update_or_create(
+                        name=name_val,
+                        led_index=led_index_val,
+                        defaults={
+                            'part_number': f"AUTO-{name_val[:10]}-{led_index_val}",
+                            'quantity': quantity_val,
+                            'value': value_val,
+                            'package_type': package_val,
+                            'storage_location': location_val,
+                        }
+                    )
 
-            
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
                 
-            messages.success(request, f"🎉 Successfully bulk-imported {created_count} new parts into the database database!")
-            
+            messages.success(
+                request,
+                f"🎉 Import complete: {created_count} added, {updated_count} updated!"
+            )
+
+
+     
         except Exception as e:
             messages.error(request, f"❌ Error processing file: {str(e)}")
             
         return redirect('part_list')
         
     return redirect('part_list')
+
+
+
+def export_parts_csv(request):
+    """Exports all ElectronicPart records into a downloadable CSV spreadsheet."""
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="wled_parts_inventory.csv"'
+
+    writer = csv.writer(response)
+    # Write header row matching your bulk import schema
+    writer.writerow([
+        'name',
+        'led_index',
+        'quantity',
+        'part_number',
+        'value',
+        'package_type',
+        'storage_location',
+    ])
+
+    # Write each part row ordered by LED slot
+    for part in ElectronicPart.objects.all().order_by('led_index', 'name'):
+        writer.writerow([
+            part.name,
+            part.led_index,
+            part.quantity,
+            part.part_number,
+            part.value,
+            part.package_type,
+            part.storage_location,
+        ])
+
+    return response

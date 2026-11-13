@@ -12,7 +12,6 @@ urlpatterns = [
     path('locate/tool/<int:pk>/', views.locate_tool, name='locate_tool'),
     # ... your existing paths (like parts/, locate/ etc.) ...
     path('parts/import/', views.bulk_import_parts, name='bulk_import_parts'),
-
+    path('parts/export/', views.export_parts_csv, name='export_parts_csv'),
 ]
-
 
