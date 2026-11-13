@@ -130,6 +130,19 @@ Once the server is running, you can access the system from your browser on the s
 * **Django Admin Panel:** `http://127.0.0` (or `http://<YOUR-LOCAL-IP>:8000/admin/`)
 
 ---
+ps. in my case:
+Test with:
+http://192.168.43.244:8000/parts/
+http://127.0.0.1:8000/parts/
+http://192.168.43.244:8000/admin/
+http://192.168.43.244/ page not found landing
+
+for esp32s3 Zero board
+http://192.168.43.129:8000/parts/
+http://127.0.0.1:8000/parts/
+http://192.168.43.129:8000/admin/
+http://192.168.43.129/ page not found landing
+---
 
 ## 📝 Troubleshooting & Notes
 
